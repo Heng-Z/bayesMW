@@ -92,7 +92,7 @@ def preprocess(img_array):
     return img_array
 
 def main():
-    directory = './vae_result_fb128_zdim128_small_data'
+    directory = './vae_result_fb32_zdim128_small_data'
     if not os.path.exists(directory):
         os.makedirs(directory)
     shutil.copy('./VAE.py', directory)
@@ -100,9 +100,9 @@ def main():
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     batch_size = 32
     z_size = 128
-    filter_base = 128
+    filter_base = 32
     batch_norm = True
-    lr_decay = 40
+    lr_decay = 100
     kl_factor = 1
     vae = VAE(zsize=z_size, layer_count=5,channels=1,filter_base=filter_base,batch_norm=batch_norm).to(device)
     vae.train()
@@ -111,7 +111,7 @@ def main():
     lr = 0.0005
     vae_optimizer = optim.Adam(vae.parameters(), lr=lr, betas=(0.5, 0.999), weight_decay=1e-5)
  
-    train_epoch = 10
+    train_epoch = 400
     sample1 = torch.randn(128, z_size).view(-1, z_size, 1, 1)
     # train_loader, test_loader = load_image(batch_size,device)
     test_loader, train_loader = load_image(batch_size,device)
@@ -144,15 +144,15 @@ def main():
 
             #############################################
 
-            os.makedirs('results_rec', exist_ok=True)
-            os.makedirs('results_gen', exist_ok=True)
+            # os.makedirs('results_rec', exist_ok=True)
+            # os.makedirs('results_gen', exist_ok=True)
 
             epoch_end_time = time.time()
             per_epoch_ptime = epoch_end_time - epoch_start_time
 
             # report losses and save samples each 60 iterations
             m = 10
-            if i % m == 0:
+            if (i+1) % m == 0:
                 rec_loss /= m
                 kl_loss /= m
                 print('\n[%d/%d] - ptime: %.2f, rec loss: %.9f, KL loss: %.9f' % (
