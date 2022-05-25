@@ -92,17 +92,17 @@ def preprocess(img_array):
     return img_array
 
 def main():
-    directory = './vae_result_fb32_zdim128_small_data'
+    directory = './vae_result_fb32_zdim32_ld200_ep2000'
     if not os.path.exists(directory):
         os.makedirs(directory)
     shutil.copy('./VAE.py', directory)
-    os.environ['CUDA_VISIBLE_DEVICES'] = '1'
+    os.environ['CUDA_VISIBLE_DEVICES'] = '0'
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     batch_size = 32
-    z_size = 128
+    z_size = 32
     filter_base = 32
     batch_norm = True
-    lr_decay = 100
+    lr_decay = 200
     kl_factor = 1
     vae = VAE(zsize=z_size, layer_count=5,channels=1,filter_base=filter_base,batch_norm=batch_norm).to(device)
     vae.train()
@@ -111,10 +111,10 @@ def main():
     lr = 0.0005
     vae_optimizer = optim.Adam(vae.parameters(), lr=lr, betas=(0.5, 0.999), weight_decay=1e-5)
  
-    train_epoch = 400
+    train_epoch = 1000
     sample1 = torch.randn(128, z_size).view(-1, z_size, 1, 1)
     # train_loader, test_loader = load_image(batch_size,device)
-    test_loader, train_loader = load_image(batch_size,device)
+    train_loader,test_loader = load_image(batch_size,device)
     for epoch in range(train_epoch):
         vae.train()
 
@@ -176,7 +176,7 @@ def main():
         # del data_train
         
         
-        if (epoch+1)%20==0:
+        if (epoch+1)%100==0:
             for j, x in enumerate(test_loader):
                 if type(x) is list:
                     x = x[0]
@@ -223,7 +223,7 @@ def main():
             plt.savefig(directory+'/hist%s.png' % (epoch+1))
 
     print("Training finish!... save training results")
-    torch.save(vae.state_dict(), "VAEmodel.pkl")
+    torch.save(vae.state_dict(), "VAEmodel_zdim32.pkl")
 
 if __name__ == '__main__':
     main()
