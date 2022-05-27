@@ -132,3 +132,4 @@ dmypy.json
 #pkl
 #*.pkl
 vae_result*
+vae_gan_result*
