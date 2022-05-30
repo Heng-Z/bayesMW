@@ -7,7 +7,7 @@ from net import VAE
 from VAE import load_image  
 from torch.autograd import Variable
 import matplotlib.pyplot as plt
-
+from PIL import Image
 def apply_mw(x,mw):
     # Simulate missing wedge effect
     # x: np array of images; shape: (batch_size, 1, im_size, im_size)
@@ -72,7 +72,9 @@ def loss_grad(y,z,decoder,sigma=1,grad=True):
         zi =  Variable(zi[None,:],requires_grad=True)
         x_tilde = decoder(zi)
         y_tilde = apply_mw(x_tilde,mw)
-        loss = torch.sum(0.5*(y_tilde-y)**2/sigma**2)
+        #p(z|y) = exp(-||y-y_tilde||^2/2sigma_s^2)*exp(-||z-zi||^2/2)
+        # loss = -log(p(z|y)) 
+        loss = torch.sum(0.5*(y_tilde-y)**2/sigma**2 + z**2)
         losses[i] = loss
         if grad:
             loss.backward()
@@ -83,26 +85,36 @@ def loss_grad(y,z,decoder,sigma=1,grad=True):
         return losses
 
 
-
+def preprocess(img_array):
+    # image_array is of shape (total_len,  height, width)
+    # normalize the image array
+    # print(img_array.shape)
+    img_array = img_array.astype(np.float32)
+    img_array = (img_array - np.percentile(img_array,5,axis=[1,2],keepdims=True)) / (np.percentile(img_array,95,axis=[1,2],keepdims=True)-np.percentile(img_array,5,axis=[1,2],keepdims=True)+1e-5)
+    return img_array
 
 
 
 # %% Test gradient
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 vae_net = VAE(zsize=128, layer_count=5,channels=1,filter_base=128).to(device)
-vae_net.load_state_dict(torch.load('VAEmodel.pkl'))
-decoder = vae_net.decode
-for param in vae_net.parameters():
+vae_net.load_state_dict(torch.load('VAEmodel.pkl')) # load trained model weight
+decoder = vae_net.decode # get decoder
+for param in vae_net.parameters(): 
     param.requires_grad = False
 
-y = torch.randn(2, 1, 128, 128).to(device)
-z = torch.randn(2, 128).to(device)
-losses, grad = loss_grad(y,z,decoder,sigma=1,grad=True)
+y = torch.randn(1, 1, 128, 128).to(device) #(batch_size, channel, im_size, im_size) # load(image)
+y_np = np.asarray(Image.open(image_path))
+y_np = preprocess(y_np)
+y = torch.from_numpy(y_np[None,:,:,:]).to(device)
+z = torch.randn(1, 128).to(device) # (batch_size, z_size)
+losses, grad = loss_grad(y,z,decoder,sigma=1,grad=True) # get loss and gradient of -log(p(z|y)) at z
+#z = z + grad*eta + torch.randn_like(z)*0.1 # update z
 print(grad)
 
 # %% Test sampling
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-z_sample = torch.randn(100, 128).to(device)
+z_sample = torch.randn(1, 128).to(device)
 x_tilde = decoder(z_sample)
 x_tilde = x_tilde.detach().cpu().numpy()
 plt.imshow(x_tilde[0,0,:,:])
