@@ -92,15 +92,15 @@ def preprocess(img_array):
     return img_array
 
 def main():
-    directory = './vae_result_fb32_zdim32_ld200_ep2000'
+    directory = './vae_result_fb128_zdim32_ld200_ep1000_small_kl1_kldecay'
     if not os.path.exists(directory):
         os.makedirs(directory)
     shutil.copy('./VAE.py', directory)
-    os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+    os.environ['CUDA_VISIBLE_DEVICES'] = '1'
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     batch_size = 32
     z_size = 32
-    filter_base = 32
+    filter_base = 128
     batch_norm = True
     lr_decay = 200
     kl_factor = 1
@@ -114,7 +114,7 @@ def main():
     train_epoch = 1000
     sample1 = torch.randn(128, z_size).view(-1, z_size, 1, 1)
     # train_loader, test_loader = load_image(batch_size,device)
-    train_loader,test_loader = load_image(batch_size,device)
+    test_loader,train_loader = load_image(batch_size,device)
     for epoch in range(train_epoch):
         vae.train()
 
@@ -122,7 +122,9 @@ def main():
         kl_loss = 0
 
         epoch_start_time = time.time()
-
+        if (epoch + 1) % 100 == 0:
+            kl_factor *= 0.5
+            print("kl_factor: ", kl_factor)
         if (epoch + 1) % lr_decay == 0:
             vae_optimizer.param_groups[0]['lr'] /= 2
             print("learning rate change!")
@@ -176,7 +178,7 @@ def main():
         # del data_train
         
         
-        if (epoch+1)%100==0:
+        if (epoch+1)%50==0:
             for j, x in enumerate(test_loader):
                 if type(x) is list:
                     x = x[0]
@@ -184,17 +186,17 @@ def main():
 
                 out = x.data.cpu()
                 # out = (out + 1) / 2
-                save_image(vutils.make_grid(out[:64], padding=5, normalize=True).cpu(), directory+'/original%s.png' % (epoch), nrow=8)
+                save_image(vutils.make_grid(out[:64], padding=5, normalize=True).cpu(), directory+'/original%s.png' % (epoch+1), nrow=8)
 
                 out = vae.decode(vae.encode(x)[0])  #out=x_tilde
                 out = out.data.cpu()
                 # out = (out + 1) / 2
-                save_image(vutils.make_grid(out[:64], padding=5, normalize=True).cpu(), directory+'/recon%s.png' % (epoch), nrow=8)
+                save_image(vutils.make_grid(out[:64], padding=5, normalize=True).cpu(), directory+'/recon%s.png' % (epoch+1), nrow=8)
 
-                # out = vae(None, 100)  ##out=x_p
-                # out = out.data.cpu()
-                # # out = (out + 1) / 2
-                # save_image(vutils.make_grid(out[:64], padding=5, normalize=True).cpu(), './vae_result/generated%s.png' % (i), nrow=8)
+                out = vae.decode(torch.randn([64,z_size]).to(device))  ##out=x_p
+                out = out.data.cpu()
+                # out = (out + 1) / 2
+                save_image(vutils.make_grid(out[:64], padding=5, normalize=True).cpu(), directory+'/sample%s.png' % (epoch+1), nrow=8)
                 break
             
             mus_list = []
@@ -223,7 +225,7 @@ def main():
             plt.savefig(directory+'/hist%s.png' % (epoch+1))
 
     print("Training finish!... save training results")
-    torch.save(vae.state_dict(), "VAEmodel_zdim32.pkl")
+    torch.save(vae.state_dict(), "VAEmodel_zdim32_fb128.pkl")
 
 if __name__ == '__main__':
     main()

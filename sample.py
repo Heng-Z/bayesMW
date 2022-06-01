@@ -8,6 +8,7 @@ from VAE import load_image
 from torch.autograd import Variable
 import matplotlib.pyplot as plt
 from PIL import Image
+import os
 def apply_mw(x,mw):
     # Simulate missing wedge effect
     # x: np array of images; shape: (batch_size, 1, im_size, im_size)
@@ -62,9 +63,10 @@ class TwoDPsf:
 def loss_grad(y,z,decoder,sigma=1,grad=True):
     # y,z,decoder should be torch tensors within the same device(cpu or cuda)
     # decoder parameter requires_grad=False
+    assert y.device == z.device
     bs = y.shape[0]
     gradient = torch.zeros_like(z)
-    losses = torch.zeros([bs,1])
+    losses = torch.zeros([bs,1]).to(y.device)
     xdim,ydim = y.shape[2:]
     mw = TwoDPsf(xdim, ydim).getMW()
     mw = torch.from_numpy(mw).float().to(y.device)
@@ -74,7 +76,7 @@ def loss_grad(y,z,decoder,sigma=1,grad=True):
         y_tilde = apply_mw(x_tilde,mw)
         #p(z|y) = exp(-||y-y_tilde||^2/2sigma_s^2)*exp(-||z-zi||^2/2)
         # loss = -log(p(z|y)) 
-        loss = torch.sum(0.5*(y_tilde-y)**2/sigma**2 + z**2)
+        loss = torch.sum(0.5*(y_tilde-y)**2/sigma**2)+torch.sum (0.5*zi**2)
         losses[i] = loss
         if grad:
             loss.backward()
@@ -93,31 +95,85 @@ def preprocess(img_array):
     img_array = (img_array - np.percentile(img_array,5,axis=[1,2],keepdims=True)) / (np.percentile(img_array,95,axis=[1,2],keepdims=True)-np.percentile(img_array,5,axis=[1,2],keepdims=True)+1e-5)
     return img_array
 
+def rescaleUint8(img_array):
+    # rescale 0~1 float array to 0~255 uint8 array
+    img_array = (img_array - img_array.min(axis=(1,2),keepdims=True))/(img_array.max(axis=(1,2),keepdims=True)-img_array.min(axis=(1,2),keepdims=True)+1e-5)*255
+    return img_array.astype(np.uint8)
 
 
 # %% Test gradient
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-vae_net = VAE(zsize=128, layer_count=5,channels=1,filter_base=128).to(device)
-vae_net.load_state_dict(torch.load('VAEmodel.pkl')) # load trained model weight
+vae_net = VAE(zsize=32, layer_count=5,channels=1,filter_base=32).to(device)
+vae_net.load_state_dict(torch.load('VAEmodel_zdim32.pkl')) # load trained model weight
 decoder = vae_net.decode # get decoder
 for param in vae_net.parameters(): 
     param.requires_grad = False
 
 y = torch.randn(1, 1, 128, 128).to(device) #(batch_size, channel, im_size, im_size) # load(image)
+ffhq_path = './ffhq_images_grey_mw/'
+img_list = os.listdir(ffhq_path)
+test_images_list = img_list[int(len(img_list)*0.9):]
+image_path=ffhq_path+test_images_list[1]
 y_np = np.asarray(Image.open(image_path))
-y_np = preprocess(y_np)
+y_np = preprocess(np.array([y_np]))
 y = torch.from_numpy(y_np[None,:,:,:]).to(device)
-z = torch.randn(1, 128).to(device) # (batch_size, z_size)
+z = torch.randn(1, 32).to(device) # (batch_size, z_size)
 losses, grad = loss_grad(y,z,decoder,sigma=1,grad=True) # get loss and gradient of -log(p(z|y)) at z
 #z = z + grad*eta + torch.randn_like(z)*0.1 # update z
-print(grad)
+#print(grad)
 
 # %% Test sampling
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-z_sample = torch.randn(1, 128).to(device)
+z_sample = torch.randn(1, 32).to(device)
 x_tilde = decoder(z_sample)
-x_tilde = x_tilde.detach().cpu().numpy()
-plt.imshow(x_tilde[0,0,:,:])
-plt.show()
+x_samples=[]
+z_traj = []
+#x_tilde = x_tilde.detach().cpu().numpy()
+#plt.imshow(x_tilde[0,0,:,:])
+#plt.show()
+#HMC sampling
+#define maximum step
+Lmax=100
+epsilons=1e-3
+for i in range(1000):
+    r0=np.random.multivariate_normal(np.zeros(z_sample.shape[1]),np.eye(z_sample.shape[1]))
+    r0=torch.from_numpy(r0).to(device)
+    h0=loss_grad(y,z_sample,decoder,sigma=1,grad=False)
+    rnew = r0.clone()
+    for j in range(np.random.randint(1,Lmax)):
+        _, grad = loss_grad(y,z_sample,decoder,sigma=1,grad=True)
+        r12=rnew-(epsilons/2)*grad
+        #thetanew=np.array([theta10,theta20])+epsilon*r12
+        znew=(z_sample+epsilons*r12).float()
+        _, grad = loss_grad(y,znew,decoder,sigma=1,grad=True)
+        rnew=r12-(epsilons/2)*grad
+        z_sample=znew
+    
+    h1=loss_grad(y,z_sample,decoder,sigma=1,grad=False)
+    a=min(1,torch.exp(h0-h1 + 0.5*torch.sum(r0**2)- 0.5*torch.sum(rnew**2)))
+    print(a)
+    if a>np.random.uniform(0,1):
+        #theta1ran[i]=thetanew[0]
+        #theta2ran[i]=thetanew[1]
+        x_tilde = decoder(z_sample)
+        x_samples.append(x_tilde)
+        z_traj.append(z_sample)
+    else:
+        continue
+        #theta1ran[i]=theta1ran[i-1]
+        #theta2ran[i]=theta2ran[i-1]
 
+
+# x_aver=(torch.sum(x_samples,0)/1000).to(device)
+# print(x_aver.shape)
+# x_aver = x_aver.detach().cpu().numpy()
+# plt.imshow(x_aver[0,0,:,:])
+# plt.show()
+
+# %%
+x_sample1 = x_samples[-1].detach().cpu().numpy()
+x_sample1_rescale = rescaleUint8(x_sample1[0])
+display(Image.fromarray(x_sample1_rescale[0]))
+a = Image.fromarray(x_sample1_rescale[0])
+# a.save('xxx')
 # %%
