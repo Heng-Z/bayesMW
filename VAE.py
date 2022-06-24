@@ -39,13 +39,10 @@ im_size = 128
 def loss_function(recon_x, x, mu, logvar):
     recon_x_flat = recon_x.view(len(recon_x), -1)
     x_flat = x.view(len(x), -1)
-    BCE = torch.mean(torch.sum(0.5*(recon_x_flat - x_flat)**2,1))
-
-    # see Appendix B from VAE paper:
-    # Kingma and Welling. Auto-Encoding Variational Bayes. ICLR, 2014
-    # https://arxiv.org/abs/1312.6114
-    # 0.5 * sum(1 + log(sigma^2) - mu^2 - sigma^2)
-    KLD = -0.5 * torch.mean(torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), 1))
+    BCE = torch.mean(0.5*(recon_x_flat - x_flat)**2)
+    KLD = -0.5 * torch.mean(torch.mean(1 + logvar - mu.pow(2) - logvar.exp(), 1))
+    # BCE = torch.mean(torch.sum(0.5*(recon_x_flat - x_flat)**2,1))
+    # KLD = -0.5 * torch.mean(torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), 1))
     return BCE, KLD
 
 
@@ -92,29 +89,30 @@ def preprocess(img_array):
     return img_array
 
 def main():
-    directory = './vae_result_fb128_zdim32_ld200_ep1000_small_kl1_kldecay'
+    directory = './vae_result_zdim8_kl00005'
+    model_name = "VAEmodel_zdim8_v1_kl00005.pkl"
     if not os.path.exists(directory):
         os.makedirs(directory)
     shutil.copy('./VAE.py', directory)
     os.environ['CUDA_VISIBLE_DEVICES'] = '1'
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     batch_size = 32
-    z_size = 32
-    filter_base = 128
+    z_size = 8
+    filter_base = 32
     batch_norm = True
     lr_decay = 200
-    kl_factor = 1
+    kl_factor = 0.0005
     vae = VAE(zsize=z_size, layer_count=5,channels=1,filter_base=filter_base,batch_norm=batch_norm).to(device)
     vae.train()
     vae.weight_init(mean=0, std=0.02)
 
-    lr = 0.0005
+    lr = 0.00005
     vae_optimizer = optim.Adam(vae.parameters(), lr=lr, betas=(0.5, 0.999), weight_decay=1e-5)
  
-    train_epoch = 1000
+    train_epoch = 500
     sample1 = torch.randn(128, z_size).view(-1, z_size, 1, 1)
-    # train_loader, test_loader = load_image(batch_size,device)
-    test_loader,train_loader = load_image(batch_size,device)
+    train_loader, test_loader = load_image(batch_size,device)
+    # test_loader,train_loader = load_image(batch_size,device)
     for epoch in range(train_epoch):
         vae.train()
 
@@ -123,10 +121,10 @@ def main():
 
         epoch_start_time = time.time()
         if (epoch + 1) % 100 == 0:
-            kl_factor *= 0.5
+            kl_factor *= 1
             print("kl_factor: ", kl_factor)
         if (epoch + 1) % lr_decay == 0:
-            vae_optimizer.param_groups[0]['lr'] /= 2
+            vae_optimizer.param_groups[0]['lr'] *= 0.5
             print("learning rate change!")
 
    
@@ -199,25 +197,30 @@ def main():
                 save_image(vutils.make_grid(out[:64], padding=5, normalize=True).cpu(), directory+'/sample%s.png' % (epoch+1), nrow=8)
                 break
             
-            mus_list = []
+            z_list = []
             for j, x in enumerate(test_loader):
                 if type(x) is list:
                     x = x[0]
-                mus = vae.encode(x)[0]
-                mus_list.append(mus.data.cpu().numpy())
-            mus_cat = np.concatenate(mus_list, axis=0)
+                mu, logvar = vae.encode(x)
+                mu = mu.squeeze()
+                logvar = logvar.squeeze()
+                z = vae.reparameterize(mu, logvar)
+                z_list.append(z.data.cpu().numpy())
+            z_cat = np.concatenate(z_list, axis=0)
 
 
             from scipy.stats import norm
 
-            s = np.linspace(-3, 3, 300)
+            s = np.linspace(-3, 3, 50)
 
             fig = plt.figure(figsize=(20, 20))
             fig.subplots_adjust(hspace=0.6, wspace=0.4)
 
-            for i in range(30):
-                ax = fig.add_subplot(3, 10, i+1)
-                ax.hist(mus_cat[:,i], density=True, bins = 20)
+            # for i in range(30):
+            #     ax = fig.add_subplot(3, 10, i+1)
+            for i in range(8):
+                ax = fig.add_subplot(1,8, i+1)
+                ax.hist(z_cat[:,i], density=True, bins = 50)
                 ax.axis('off')
                 ax.text(0.5, -0.35, str(i), fontsize=10, ha='center', transform=ax.transAxes)
                 ax.plot(s,norm.pdf(s))
@@ -225,7 +228,8 @@ def main():
             plt.savefig(directory+'/hist%s.png' % (epoch+1))
 
     print("Training finish!... save training results")
-    torch.save(vae.state_dict(), "VAEmodel_zdim32_fb128.pkl")
+    torch.save(vae.state_dict(), model_name)
 
 if __name__ == '__main__':
     main()
+

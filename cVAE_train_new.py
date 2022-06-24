@@ -21,7 +21,6 @@ from torch import diag_embed, optim
 from torchvision.utils import save_image
 import torchvision.utils as vutils
 from cvae_net import *
-from cvae_net_2 import CVAE
 import numpy as np
 import pickle
 import time
@@ -44,7 +43,11 @@ def loss_function(recon_x, x, mu0, logvar0, mu1, logvar1):
     KLD = 0.5*torch.mean(torch.mean(torch.exp(logvar0)/torch.exp(logvar1) + (mu0-mu1)**2/(torch.exp(logvar1)) - 1 - logvar0+logvar1, 1))
     # TODO:
     # add the KL divergence loss between teacher encoder ouput and standard normal
-    return BCE, KLD
+    KLD_xy = 0.5*torch.mean(torch.mean(mu0**2+torch.exp(logvar0)-logvar0-1, 1))
+    # add the KL divergence loss between student encoder ouput and standard normal
+    # KLD_y = 0.5*torch.mean(torch.sum(mu1**2+torch.exp(logvar1)-logvar1-1, 1))
+    # return BCE, KLD,KLD_xy,KLD_y
+    return BCE,KLD,KLD_xy
 
 def load_image(bs,device):
     ffhq_path = './ffhq_images_grey/'
@@ -87,19 +90,6 @@ def load_image(bs,device):
     test_loader = DataLoader(TensorDataset(test_X,test_Y), batch_size=bs, shuffle=False)
     return train_loader, test_loader
 
-def load_cryoET(bs,device):
-    x_path = './cryoET_XY/x_array.npy'
-    y_path = './cryoET_XY/y_array.npy'
-    x_array = np.load(x_path)
-    y_array = np.load(y_path)
-    train_X = torch.from_numpy(x_array[:2000]).float().to(device)
-    train_Y = torch.from_numpy(y_array[:2000]).float().to(device)
-    test_X = torch.from_numpy(x_array[2000:]).float().to(device)
-    test_Y = torch.from_numpy(y_array[2000:]).float().to(device)
-    train_loader = DataLoader(TensorDataset(train_X,train_Y), batch_size=bs, shuffle=False)
-    test_loader = DataLoader(TensorDataset(test_X,test_Y), batch_size=bs, shuffle=False)
-    return train_loader, test_loader
-
 def preprocess(img_array):
     # image_array is of shape (total_len,  height, width)
     # normalize the image array
@@ -107,10 +97,8 @@ def preprocess(img_array):
     img_array = img_array.astype(np.float32)
     img_array = (img_array - np.percentile(img_array,3,axis=[1,2],keepdims=True)) / (np.percentile(img_array,97,axis=[1,2],keepdims=True)-np.percentile(img_array,3,axis=[1,2],keepdims=True)+1e-5)
     return img_array
-
 def main():
-    directory = './cvae_result_ET_test5_unet'
-    model_name = "CVAEmodel_zdim32_ET5_unet.pkl"
+    directory = './cvae_result_xyKL01/'
     if not os.path.exists(directory):
         os.makedirs(directory)
     shutil.copy('./cVAE_train.py', directory)
@@ -121,7 +109,9 @@ def main():
     filter_base = 32
     batch_norm = True
     lr_decay = 200
-    kl_factor = 0.01
+    kl_factor = 0.1
+    kl_xy = 0.1
+    # kl_y = 0.1
     cvae = CVAE(zsize=z_size, layer_count=5,channels=1,filter_base=filter_base,batch_norm=batch_norm).to(device)
     cvae.train()
     cvae.weight_init(mean=0, std=0.02)
@@ -129,15 +119,16 @@ def main():
     lr = 0.00005
     vae_optimizer = optim.Adam(cvae.parameters(), lr=lr, betas=(0.5, 0.999), weight_decay=1e-5)
  
-    train_epoch = 1000
-    # train_loader, test_loader = load_image(batch_size,device)
-    train_loader, test_loader = load_cryoET(batch_size,device)
+    train_epoch = 500
+    train_loader, test_loader = load_image(batch_size,device)
     # test_loader,train_loader = load_image(batch_size,device)
     for epoch in range(train_epoch):
         cvae.train()
 
         rec_loss = 0
         kl_loss = 0
+        xy_loss = 0
+        y_loss = 0
 
         epoch_start_time = time.time()
         if (epoch + 1) % 100 == 0:
@@ -153,12 +144,15 @@ def main():
             cvae.zero_grad()
             rec, mu0, logvar0, mu1, logvar1= cvae(x,y)
 
-            loss_re, loss_kl = loss_function(rec, x, mu0, logvar0, mu1, logvar1)
-            (loss_re + kl_factor*loss_kl).backward()
+            # loss_re, loss_kl,regular_xy,regular_y= loss_function(rec, x, mu0, logvar0, mu1, logvar1)
+            # (loss_re + kl_factor*loss_kl + kl_xy*regular_xy + kl_y*regular_y).backward()
+            loss_re, loss_kl,regular_xy = loss_function(rec, x, mu0, logvar0, mu1, logvar1)
+            (loss_re + kl_factor*loss_kl + kl_xy*regular_xy).backward()
             vae_optimizer.step()
             rec_loss += loss_re.item()
             kl_loss += loss_kl.item()
-
+            xy_loss += regular_xy.item()
+            # y_loss += regular_y.item()
             #############################################
 
             # os.makedirs('results_rec', exist_ok=True)
@@ -172,10 +166,16 @@ def main():
             if (i+1) % m == 0:
                 rec_loss /= m
                 kl_loss /= m
-                print('\n[%d/%d] - ptime: %.2f, rec loss: %.9f, KL loss: %.9f' % (
-                    (epoch + 1), train_epoch, per_epoch_ptime, rec_loss, kl_loss))
+                xy_loss /= m
+                # y_loss /= m
+                # print('\n[%d/%d] - ptime: %.2f, rec loss: %.9f, KL loss: %.9f,xy loss: %.9f,y loss: %.9f,' % (
+                #   (epoch + 1), train_epoch, per_epoch_ptime, rec_loss, kl_loss, xy_loss, y_loss))
+                print('\n[%d/%d] - ptime: %.2f, rec loss: %.9f, KL loss: %.9f,xy loss: %.9f' % (
+                    (epoch + 1), train_epoch, per_epoch_ptime, rec_loss, kl_loss, xy_loss))
                 rec_loss = 0
                 kl_loss = 0
+                xy_loss = 0
+                # y_loss = 0
         #         with torch.no_grad():
         #             vae.eval()
         #             x_rec, _, _ = vae(x)
@@ -202,12 +202,12 @@ def main():
                 save_image(vutils.make_grid(out[:64], padding=5, normalize=True).cpu(), directory+'/x%s.png' % (epoch+1), nrow=8)
                 out = y.data.cpu()
                 save_image(vutils.make_grid(out[:64], padding=5, normalize=True).cpu(), directory+'/y%s.png' % (epoch+1), nrow=8)
-                out = cvae.decode(cvae.encode_y(y)[0],y)  #out=x_tilde
-                out = out.data.cpu()
-                save_image(vutils.make_grid(out[:64], padding=5, normalize=True).cpu(), directory+'/yrecon%s.png' % (epoch+1), nrow=8)
                 out = cvae.decode(cvae.encode_xy(x,y)[0],y)  #out=x_tilde
                 out = out.data.cpu()
                 save_image(vutils.make_grid(out[:64], padding=5, normalize=True).cpu(), directory+'/xyrecon%s.png' % (epoch+1), nrow=8)
+                out = cvae.decode(cvae.encode_y(y)[0],y)  #out=x_tilde
+                out = out.data.cpu()
+                save_image(vutils.make_grid(out[:64], padding=5, normalize=True).cpu(), directory+'/yrecon%s.png' % (epoch+1), nrow=8)
                 
                 # out = cvae.decode(torch.randn([64,z_size]).to(device))  ##out=x_p
                 # out = out.data.cpu()
@@ -244,7 +244,7 @@ def main():
             # plt.savefig(directory+'/hist%s.png' % (epoch+1))
 
     print("Training finish!... save training results")
-    torch.save(cvae.state_dict(), model_name)
+    torch.save(cvae.state_dict(), "CVAEmodel_zdim32_xyKL01.pkl")
 
 if __name__ == '__main__':
     main()

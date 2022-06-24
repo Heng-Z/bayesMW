@@ -9,6 +9,8 @@ from torch.autograd import Variable
 import matplotlib.pyplot as plt
 from PIL import Image
 import os
+import time
+
 def apply_mw(x,mw):
     # Simulate missing wedge effect
     # x: np array of images; shape: (batch_size, 1, im_size, im_size)
@@ -60,7 +62,7 @@ class TwoDPsf:
         return self._mw
 
 # Loss and gradient for a pair of y and latent variable z
-def loss_grad(y,z,decoder,sigma=1,grad=True):
+def loss_grad(y,z,decoder,mw,sigma=1,grad=True):
     # y,z,decoder should be torch tensors within the same device(cpu or cuda)
     # decoder parameter requires_grad=False
     assert y.device == z.device
@@ -68,19 +70,21 @@ def loss_grad(y,z,decoder,sigma=1,grad=True):
     gradient = torch.zeros_like(z)
     losses = torch.zeros([bs,1]).to(y.device)
     xdim,ydim = y.shape[2:]
-    mw = TwoDPsf(xdim, ydim).getMW()
-    mw = torch.from_numpy(mw).float().to(y.device)
     for i, zi in enumerate(z):
         zi =  Variable(zi[None,:],requires_grad=True)
+        t1 = time.time()
         x_tilde = decoder(zi)
+        t2 = time.time()
         y_tilde = apply_mw(x_tilde,mw)
         #p(z|y) = exp(-||y-y_tilde||^2/2sigma_s^2)*exp(-||z-zi||^2/2)
         # loss = -log(p(z|y)) 
         loss = torch.sum(0.5*(y_tilde-y)**2/sigma**2)+torch.sum (0.5*zi**2)
-        losses[i] = loss
+        losses[i] = loss.data
         if grad:
             loss.backward()
             gradient[i] = zi.grad
+        t3 = time.time()
+        print('decoder: %.6f,bp: %.6f'%(t2-t1,t3-t1))
     if grad:
         return losses, gradient
     else:
@@ -104,8 +108,8 @@ def rescaleUint8(img_array):
 # %% Test gradient
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 vae_net = VAE(zsize=32, layer_count=5,channels=1,filter_base=32).to(device)
-vae_net.load_state_dict(torch.load('VAEmodel_zdim32.pkl')) # load trained model weight
-vae_net.eval() # to eval is important!!! turn off batch normalization
+vae_net.load_state_dict(torch.load('VAEmodel_zdim32_v2.pkl')) # load trained model weight
+vae_net.eval()
 decoder = vae_net.decode # get decoder
 for param in vae_net.parameters(): 
     param.requires_grad = False
@@ -119,7 +123,7 @@ y_np = np.asarray(Image.open(image_path))
 y_np = preprocess(np.array([y_np]))
 y = torch.from_numpy(y_np[None,:,:,:]).to(device)
 z = torch.randn(1, 32).to(device) # (batch_size, z_size)
-losses, grad = loss_grad(y,z,decoder,sigma=1,grad=True) # get loss and gradient of -log(p(z|y)) at z
+losses, grad = loss_grad(y,z,decoder,mw,sigma=1,grad=True) # get loss and gradient of -log(p(z|y)) at z
 #z = z + grad*eta + torch.randn_like(z)*0.1 # update z
 #print(grad)
 
@@ -134,31 +138,41 @@ z_traj = []
 #plt.show()
 #HMC sampling
 #define maximum step
-Lmax=100
+Lmax=1000
 epsilons=1e-2
-for i in range(1000):
-    r0=np.random.multivariate_normal(np.zeros(z_sample.shape[1]),np.eye(z_sample.shape[1]))
-    r0=torch.from_numpy(r0).to(device)
-    h0=loss_grad(y,z_sample,decoder,sigma=1,grad=False)
+sims=100
+count=0
+mw = TwoDPsf(128, 128).getMW()
+mw = torch.from_numpy(mw).float().to(device)
+for i in range(sims):
+    r0=torch.randn_like(z_sample)
+    h0=loss_grad(y,z_sample,decoder,mw,sigma=1,grad=False)
     rnew = r0.clone()
-    for j in range(np.random.randint(1,Lmax)):
-        _, grad = loss_grad(y,z_sample,decoder,sigma=1,grad=True)
+    lstep=torch.randint(1,Lmax,(1,)).to(device)
+    for j in range(lstep):
+        t1 = time.time()
+        _, grad = loss_grad(y,z_sample,decoder,mw,sigma=1,grad=True)
+        t2 = time.time()
         r12=rnew-(epsilons/2)*grad
         #thetanew=np.array([theta10,theta20])+epsilon*r12
         znew=(z_sample+epsilons*r12).float()
-        _, grad = loss_grad(y,znew,decoder,sigma=1,grad=True)
+        _, grad = loss_grad(y,znew,decoder,mw,sigma=1,grad=True)
         rnew=r12-(epsilons/2)*grad
+        t3 = time.time()
         z_sample=znew
+        if j%10==0:
+            print('grad time: %.5f one step time %.5f'%(t2-t1,t3-t1))
     
-    h1=loss_grad(y,z_sample,decoder,sigma=1,grad=False)
+    h1=loss_grad(y,z_sample,decoder,mw,sigma=1,grad=False)
     a=min(1,torch.exp(h0-h1 + 0.5*torch.sum(r0**2)- 0.5*torch.sum(rnew**2)))
-    print(a)
-    if a>np.random.uniform(0,1):
+    print(a,lstep)
+    if a>torch.rand(1).to(device):
         #theta1ran[i]=thetanew[0]
         #theta2ran[i]=thetanew[1]
         x_tilde = decoder(z_sample)
         x_samples.append(x_tilde)
         z_traj.append(z_sample)
+        count+=1
     else:
         continue
         #theta1ran[i]=theta1ran[i-1]
@@ -170,11 +184,27 @@ for i in range(1000):
 # x_aver = x_aver.detach().cpu().numpy()
 # plt.imshow(x_aver[0,0,:,:])
 # plt.show()
-
 # %%
 x_sample1 = x_samples[-1].detach().cpu().numpy()
 x_sample1_rescale = rescaleUint8(x_sample1[0])
 display(Image.fromarray(x_sample1_rescale[0]))
 a = Image.fromarray(x_sample1_rescale[0])
+a.save('lastface.png')
+acorrlist=[]
+z_trajnew=[]
+x_samplenew=[]
+for i in range(count):
+    z_traj[i] = z_traj[i].detach().cpu().numpy()
+    z_trajnew.append(z_traj[i])
+z_trajnew=np.array(z_trajnew)
+
+for i in range(32):
+    ndata=z_trajnew[:,0,i]
+    acorr = np.correlate(ndata, ndata, 'full')[len(ndata)-1:] 
+    acorrlist.append(acorr)
+    plt.plot(np.arange(count),np.array(acorr))
+    plt.show()
+    plt.savefig('zcorrelation'+str(i)+'.png')
+#acorr = numpy.correlate(ndata, ndata, 'full')[len(ndata)-1:] 
 # a.save('xxx')
 # %%

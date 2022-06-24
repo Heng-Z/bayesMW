@@ -39,17 +39,15 @@ im_size = 128
 def loss_function(recon_x, x, mu, logvar,disc_recon,disc_orig):
     recon_x_flat = recon_x.view(len(recon_x), -1)
     x_flat = x.view(len(x), -1)
-    BCE = torch.mean(torch.sum(0.5*(recon_x_flat - x_flat)**2,1))
-
-    # see Appendix B from VAE paper:
-    # Kingma and Welling. Auto-Encoding Variational Bayes. ICLR, 2014
-    # https://arxiv.org/abs/1312.6114
-    # 0.5 * sum(1 + log(sigma^2) - mu^2 - sigma^2)
-    KLD = -0.5 * torch.mean(torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), 1))
+    # BCE = torch.mean(torch.sum(0.5*(recon_x_flat - x_flat)**2,1))
+    # KLD = -0.5 * torch.mean(torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), 1))
+    BCE = torch.mean(0.5*(recon_x_flat - x_flat)**2)
+    KLD = -0.5 * torch.mean(torch.mean(1 + logvar - mu.pow(2) - logvar.exp(), 1))
+    
     # Discriminator classification loss
-    DC_disc = -torch.mean(torch.log(disc_recon)) 
-    DC_orig = - torch.mean(torch.log(1-disc_orig))
-    return BCE, KLD,DC_disc,DC_orig
+    DC_disc = -torch.mean(torch.log(1-disc_recon+1e-5))
+    DC_orig = - torch.mean(torch.log(disc_orig+1e-5))
+    return BCE, 0.1*KLD,DC_disc,DC_orig
 
 
 # def process_batch(batch):
@@ -95,32 +93,36 @@ def preprocess(img_array):
     return img_array
 
 def main():
-    directory = './vae_gan_results_imf2000_fb128/'
-    model_name = './vae_gan_imfc200_fb128.pkl'
+    directory = './vae_gan_results_meanloss'
+    model_name = './vae_gan_imfc200_fb32.pkl'
     if not os.path.exists(directory):
         os.makedirs(directory)
-    shutil.copy('./VAE.py', directory)
-    os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+    # shutil.copy('./VAE.py', directory)
+    os.environ['CUDA_VISIBLE_DEVICES'] = '2'
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     batch_size = 32
     z_size = 32
-    filter_base = 128
+    filter_base = 32
     batch_norm = True
-    lr_decay = 200
-    kl_factor = 1
-    imitate_factor = 2000
+    lr_decay = 400
+    kl_factor = 0.1
+    imitate_factor = 0.01
+    imit_grow = 200
     vaegan = VAEGAN(zsize=z_size, layer_count=5,channels=1,filter_base=filter_base,batch_norm=batch_norm).to(device)
     vaegan.train()
     vaegan.weight_init(mean=0, std=0.02)
 
     lr = 0.0005
-    vae_optimizer = optim.Adam(vaegan.vae.parameters(), lr=lr)
-    dic_optimizer = optim.Adam(vaegan.discriminator.parameters(), lr=lr)
+    m = 20
+    vae_optimizer = optim.Adam(vaegan.vae.parameters(), lr=lr, betas=(0.5, 0.999), weight_decay=1e-5)
+    dic_optimizer = optim.Adam(vaegan.discriminator.parameters(), lr=lr, betas=(0.5, 0.999), weight_decay=1e-5)
  
-    train_epoch = 1000
+    train_epoch = 2000
     sample1 = torch.randn(128, z_size).view(-1, z_size, 1, 1)
     train_loader, test_loader = load_image(batch_size,device)
     # test_loader,train_loader = load_image(batch_size,device)
+    train_disc = True
+    train_vae = True
     for epoch in range(train_epoch):
         vaegan.train()
 
@@ -129,11 +131,13 @@ def main():
         d_recon_loss = 0
         d_orig_loss = 0
         epoch_start_time = time.time()
-        train_disc = True
-        train_vae = True
+        if (epoch + 1) % imit_grow == 0:
+            imitate_factor = imitate_factor * 1.5 if imitate_factor < 999 else imitate_factor
+            print('imitation factor:', imitate_factor)
         if (epoch + 1) % lr_decay == 0:
             vae_optimizer.param_groups[0]['lr'] /= 2
             dic_optimizer.param_groups[0]['lr'] /= 2
+            
             print("learning rate change!")
 
    
@@ -146,8 +150,9 @@ def main():
             x_tilde, mu, logvar,disc_recon, disc_orig = vaegan(x)
 
             loss_re, loss_kl, loss_disc_recon,loss_disc_orig = loss_function(x_tilde, x, mu, logvar,disc_recon, disc_orig)
-            loss_gen = loss_re + kl_factor * loss_kl - imitate_factor*(loss_disc_recon+loss_disc_orig)
+            loss_gen = loss_re + kl_factor * loss_kl - imitate_factor*(loss_disc_recon)
             loss_disc = loss_disc_recon + loss_disc_orig
+            # if True:
             if train_vae:
                 loss_gen.backward(retain_graph=True)
                 vae_optimizer.step()
@@ -155,6 +160,9 @@ def main():
             if train_disc:
                 loss_disc.backward(retain_graph=True)
                 dic_optimizer.step()
+                # if train_disc:
+                #     # print the gradients
+                #     print(vaegan.discriminator.conv1.weight.grad[0])
                 vaegan.zero_grad()
 
             rec_loss += loss_re.item()
@@ -171,7 +179,6 @@ def main():
             per_epoch_ptime = epoch_end_time - epoch_start_time
 
             # report losses and save samples each 60 iterations
-            m = 10
             if (i+1) % m == 0:
                 rec_loss /= m
                 kl_loss /= m
@@ -211,6 +218,7 @@ def main():
         # del batches
         # del data_train
         
+
         vae = vaegan.vae
         if (epoch+1)%50==0:
             for j, x in enumerate(test_loader):
